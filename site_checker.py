@@ -3,122 +3,118 @@ import socket
 import ssl
 import sys
 import urllib.parse
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 import requests
 
 
 def check_ssl(url):
-    """1. Έλεγχος αν το SSL πιστοποιητικό είναι έγκυρο και ενεργό."""
     parsed_url = urllib.parse.urlparse(url)
     hostname = parsed_url.hostname
     port = parsed_url.port or 443
-
     if parsed_url.scheme != "https":
-        return "❌ ⚠️ Μη ασφαλές πρωτόκολλο (HTTP αντί για HTTPS)"
-
+        return "❌ Μη ασφαλές πρωτόκολλο (HTTP αντί για HTTPS)"
     context = ssl.create_default_context()
     try:
         with socket.create_connection((hostname, port), timeout=5) as sock:
             with context.wrap_socket(sock, server_hostname=hostname) as ssock:
                 ssock.getpeercert()
                 return "✅ Έγκυρο"
-    except ssl.SSLCertVerificationError as e:
-        return f"❌ Άκυρο Πιστοποιητικό (Σφάλμα Επαλήθευσης: {e.reason})"
-    except Exception as e:
-        return f"❌ Αποτυχία σύνδεσης / Έλεγχου SSL ({str(e)})"
+    except Exception:
+        return "❌ Πρόβλημα με το πιστοποιητικό SSL (Ληγμένο ή Άκυρο)"
 
 
 def check_security_headers(url):
-    """2. Έλεγχος αν το X-Frame-Options header είναι ρυθμισμένο."""
     try:
         response = requests.get(url, timeout=5, allow_redirects=True)
-        headers = response.headers
-        x_frame_options = headers.get("X-Frame-Options")
-
-        if x_frame_options:
-            val = x_frame_options.upper()
-            if val in ["DENY", "SAMEORIGIN"]:
-                return f"✅ Ρυθμισμένο σωστά ({x_frame_options})"
-            return f"⚠️ Υπάρχει αλλά με μη τυπική τιμή ({x_frame_options})"
-        else:
-            return "❌ Λείπει (Κίνδυνος για Clickjacking)"
-    except requests.exceptions.RequestException:
-        return "❌ Αποτυχία HTTP αίτησης κατά τον έλεγχο headers"
+        if "X-Frame-Options" in response.headers:
+            return "✅ Ρυθμισμένο σωστά"
+        return "❌ Λείπει το X-Frame-Options header (Κίνδυνος Clickjacking)"
+    except Exception:
+        return "❌ Αποτυχία σύνδεσης για έλεγχο Headers"
 
 
 def check_robots_txt(url):
-    """3. Έλεγχος αν υπάρχει το αρχείο robots.txt."""
     parsed_url = urllib.parse.urlparse(url)
     robots_url = f"{parsed_url.scheme}://{parsed_url.netloc}/robots.txt"
-
     try:
         response = requests.get(robots_url, timeout=5, allow_redirects=True)
         if response.status_code == 200:
             return "✅ Βρέθηκε"
-        else:
-            return f"❌ Δεν βρέθηκε (Status Code: {response.status_code})"
-    except requests.exceptions.RequestException:
+        return f"❌ Λείπει το αρχείο robots.txt (Πρόβλημα SEO)"
+    except Exception:
         return "❌ Αποτυχία σύνδεσης στο robots.txt"
 
 
-def send_telegram_alert(token, chat_id, message):
-    """Αποστολή ειδοποίησης στο Telegram."""
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message}
+def send_auto_email(sender_email, sender_password, target_email, site_url, errors_text):
+    """Λειτουργία που στέλνει αυτόματα το προσωποποιημένο email."""
+    msg = MIMEMultipart()
+    msg['From'] = sender_email
+    msg['To'] = target_email
+    msg['Subject'] = f"Σημαντικό: Θέματα ασφαλείας και SEO στην ιστοσελίδα {site_url}"
+
+    body = f"""Καλημέρα σας,
+
+Ονομάζομαι Ραφαήλ και διεξήγαγα έναν αυτόματο έλεγχο ασφαλείας και βελτιστοποίησης στην ιστοσελίδα σας ({site_url}).
+
+Εντοπίστηκαν ορισμένα τεχνικά ζητήματα που χρήζουν άμεσης προσοχής:
+{errors_text}
+
+Αυτά τα προβλήματα μπορούν να επηρεάσουν την εμπιστοσύνη των επισκεπτών σας αλλά και τη θέση της σελίδας σας στη Google. Μπορώ να αναλάβω την άμεση διόρθωσή τους με ένα πολύ χαμηλό κόστος.
+
+Αν σας ενδιαφέρει να το φτιάξουμε, απαντήστε μου σε αυτό το email για να συζητήσουμε τις λεπτομέρειες.
+
+Με εκτίμηση,
+Ραφαήλ Δραγατίδης"""
+
+    msg.attach(MIMEText(body, 'plain', 'utf-8'))
+
     try:
-        requests.post(url, json=payload, timeout=5)
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.sendmail(sender_email, target_email, msg.as_string())
+        server.quit()
+        print(f"📬 Το email στάλθηκε επιτυχώς στο {target_email}!")
     except Exception as e:
-        print(f"Αποτυχία αποστολής Telegram: {e}")
+        print(f"❌ Αποτυχία αποστολής email: {e}")
 
 
 def main():
-    # Διάβασμα των ρυθμίσεων από το περιβάλλον του GitHub
     urls_env = os.getenv("URLS_TO_CHECK", "")
-    telegram_token = os.getenv("TELEGRAM_TOKEN")
-    telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    my_email = os.getenv("MY_EMAIL")
+    my_password = os.getenv("MY_GMAIL_APP_PASSWORD")
+    client_email = os.getenv("CLIENT_EMAIL") # Το email του ιδιοκτήτη που θα λάβει την προσφορά
 
     if not urls_env:
-        print(
-            "❌ Σφάλμα: Δεν βρέθηκαν URLs για έλεγχο. Ρύθμισε το 'URLS_TO_CHECK' στα Secrets."
-        )
+        print("❌ Δεν βρέθηκαν URLs.")
         sys.exit(1)
 
-    # Διαχωρισμός των URLs αν είναι πολλά (χωρισμένα με κόμμα)
     urls_to_check = [url.strip() for url in urls_env.split(",") if url.strip()]
 
-    has_errors = False
-    report_lines = ["🚨 Αναφορά Προβλημάτων Ιστοσελίδων:"]
-
     for url in urls_to_check:
-        print(f"Έλεγχος: {url}...")
+        print(f"Έλεγχος για το site: {url}...")
         ssl_res = check_ssl(url)
         headers_res = check_security_headers(url)
         robots_res = check_robots_txt(url)
 
-        # Αν βρεθεί σφάλμα (❌), το καταγράφουμε
+        # Αν βρεθεί έστω και ένα σφάλμα (❌)
         if "❌" in ssl_res or "❌" in headers_res or "❌" in robots_res:
-            has_errors = True
-            report_lines.append(
-                f"\n🔗 Site: {url}\n"
-                f"🔒 SSL: {ssl_res}\n"
-                f"🛡️ Header: {headers_res}\n"
-                f"🤖 Robots: {robots_res}\n"
-                f"------------------------"
-            )
-
-    # Αν βρέθηκαν σφάλματα και έχουμε ρυθμίσει Telegram, στείλε μήνυμα
-    if has_errors:
-        full_message = "\n".join(report_lines)
-        print("\n" + full_message)
-
-        if telegram_token and telegram_chat_id:
-            send_telegram_alert(telegram_token, telegram_chat_id, full_message)
-            print("📬 Η ειδοποίηση στάλθηκε στο Telegram.")
+            errors_list = []
+            if "❌" in ssl_res: errors_list.append(f"- {ssl_res}")
+            if "❌" in headers_res: errors_list.append(f"- {headers_res}")
+            if "❌" in robots_res: errors_list.append(f"- {robots_res}")
+            
+            errors_str = "\n".join(errors_list)
+            
+            # Αν έχουμε ρυθμίσει email, στείλτο αυτόματα στον πελάτη!
+            if my_email and my_password and client_email:
+                send_auto_email(my_email, my_password, client_email, url, errors_str)
+            else:
+                print(f"⚠️ Βρέθηκαν σφάλματα για το {url} αλλά δεν έχουν ρυθμιστεί τα email στα Secrets.")
         else:
-            print(
-                "⚠️ Το Telegram δεν έχει ρυθμιστεί, η αναφορά τυπώθηκε μόνο στα logs."
-            )
-    else:
-        print("\n✅ Όλα τα sites είναι πεντακάθαρα! Κανένα πρόβλημα.")
+            print(f"✅ Το site {url} είναι καθαρό. Δεν στάλθηκε email.")
 
 
 if __name__ == "__main__":
